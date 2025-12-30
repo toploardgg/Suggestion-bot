@@ -1,5 +1,5 @@
 # Код написан Toploardgg 30 декабря 2025 года
-# Telegram бот с выбором языка и пересылкой сообщений админу
+# Telegram бот с выбором языка и пересылкой сообщений админу + ответы от админа
 
 import asyncio
 import logging
@@ -10,8 +10,6 @@ from aiogram.filters import Command
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiogram.fsm.storage.memory import MemoryStorage
 from config import BOT_TOKEN, ADMIN_ID
-from aiogram.filters import Command
-from aiogram import F
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -26,6 +24,10 @@ LANGUAGES_FILE = "user_languages.json"
 # Словарь для хранения выбранного языка пользователей
 user_languages = {}
 
+# Словарь для хранения соответствия message_id админа -> user_id отправителя
+# Формат: {message_id_в_чате_админа: user_id_отправителя}
+admin_message_map = {}
+
 # Тексты на разных языках
 TEXTS = {
     'en': {
@@ -38,7 +40,8 @@ TEXTS = {
             '✉️ Just send me a message and I will forward it to the author!'
         ),
         'forwarded_to_admin': '✅ Your message has been forwarded to the author!',
-        'admin_notification': '📨 New message from user'
+        'admin_notification': '📨 New message from user',
+        'admin_reply': '💬 Reply from author:'
     },
     'ru': {
         'welcome': '👋 Добро пожаловать! Пожалуйста, выберите язык:',
@@ -51,7 +54,8 @@ TEXTS = {
             '✉️ Просто отправьте мне сообщение, и я перешлю его автору!'
         ),
         'forwarded_to_admin': '✅ Ваше сообщение отправлено автору!',
-        'admin_notification': '📨 Новое сообщение от пользователя'
+        'admin_notification': '📨 Новое сообщение от пользователя',
+        'admin_reply': '💬 Ответ от автора:'
     }
 }
 
@@ -127,9 +131,9 @@ async def process_language_selection(callback: CallbackQuery):
     )
     await callback.answer()
 
-# Обработчик всех текстовых сообщений
-@dp.message(F.text)
-async def forward_to_admin(message: Message):
+# Обработчик текстовых сообщений от пользователей (НЕ админа)
+@dp.message(F.text & ~F.from_user.id.in_([ADMIN_ID]))
+async def forward_text_to_admin(message: Message):
     user_id = message.from_user.id
     
     # Проверяем, выбран ли язык
@@ -155,42 +159,16 @@ async def forward_to_admin(message: Message):
     )
     
     # Отправляем сообщение админу
-    await bot.send_message(ADMIN_ID, user_info)
+    sent_msg = await bot.send_message(ADMIN_ID, user_info)
+    
+    # Сохраняем связь: message_id админа -> user_id отправителя
+    admin_message_map[sent_msg.message_id] = user_id
     
     # Подтверждение пользователю
     await message.answer(TEXTS[lang]['forwarded_to_admin'])
 
-@dp.message(F.reply_to_message & F.from_user.id == ADMIN_ID)
-async def admin_reply_handler(message: Message):
-    """
-    Обрабатывает ответы админа на пересланные сообщения пользователей.
-    Пересылает сообщение админа обратно исходному пользователю.
-    Поддерживает все типы: текст, фото, видео, кружки (video_note), голосовые, стикеры, документы, анимации и т.д.
-    """
-    replied_msg = message.reply_to_message
-    
-    # Проверяем, что это наше пересланное сообщение и есть forward_from
-    if replied_msg.forward_from:
-        original_user_id = replied_msg.forward_from.id
-    elif replied_msg.forward_sender_name:  # если пользователь скрыл профиль
-        # К сожалению, в этом случае ID недоступен — пропускаем или уведомляем админа
-        await message.reply("❌ Не могу отправить: пользователь скрыл профиль (forward_sender_name)")
-        return
-    else:
-        await message.reply("❌ Это не пересланное сообщение от пользователя")
-        return
-    
-    try:
-        # Копируем сообщение админа пользователю (сохраняет весь формат и тип)
-        await message.copy_to(chat_id=original_user_id)
-        # Опционально: подтверждение админу
-        await message.reply("✅ Ответ отправлен пользователю!")
-    except Exception as e:
-        logging.error(f"Ошибка отправки ответа пользователю {original_user_id}: {e}")
-        await message.reply(f"❌ Ошибка отправки: {e}")
-
-# Обработчик всех остальных типов сообщений (фото, видео, документы, кружки, голосовые и т.д.)
-@dp.message()
+# Обработчик медиа-сообщений от пользователей (НЕ админа)
+@dp.message(~F.text & ~F.from_user.id.in_([ADMIN_ID]))
 async def forward_media_to_admin(message: Message):
     user_id = message.from_user.id
     
@@ -244,13 +222,78 @@ async def forward_media_to_admin(message: Message):
     )
     
     # Отправляем информацию админу
-    await bot.send_message(ADMIN_ID, user_info)
+    info_msg = await bot.send_message(ADMIN_ID, user_info)
     
     # Пересылаем само сообщение (со всеми медиа, кружками, голосовыми и т.д.)
-    await message.forward(ADMIN_ID)
+    forwarded_msg = await message.forward(ADMIN_ID)
+    
+    # Сохраняем связь для пересланного сообщения
+    admin_message_map[forwarded_msg.message_id] = user_id
     
     # Подтверждение пользователю
     await message.answer(TEXTS[lang]['forwarded_to_admin'])
+
+# Обработчик ОТВЕТОВ от АДМИНА на текстовые сообщения
+@dp.message(F.reply_to_message & F.text & F.from_user.id.in_([ADMIN_ID]))
+async def admin_text_reply(message: Message):
+    # Получаем ID сообщения, на которое отвечает админ
+    replied_message_id = message.reply_to_message.message_id
+    
+    # Проверяем, есть ли это сообщение в нашей карте
+    if replied_message_id not in admin_message_map:
+        await message.answer("❌ Не могу найти получателя для этого сообщения.")
+        return
+    
+    # Получаем user_id получателя
+    recipient_id = admin_message_map[replied_message_id]
+    
+    # Получаем язык пользователя
+    lang = user_languages.get(recipient_id, 'en')
+    
+    try:
+        # Отправляем текст пользователю с заголовком
+        await bot.send_message(
+            recipient_id,
+            f"{TEXTS[lang]['admin_reply']}\n\n{message.text}"
+        )
+        
+        # Подтверждение админу
+        await message.answer("✅ Ответ отправлен пользователю!")
+        
+    except Exception as e:
+        await message.answer(f"❌ Ошибка отправки: {e}")
+        logging.error(f"Ошибка отправки ответа пользователю {recipient_id}: {e}")
+
+# Обработчик ОТВЕТОВ от АДМИНА на медиа-сообщения
+@dp.message(F.reply_to_message & ~F.text & F.from_user.id.in_([ADMIN_ID]))
+async def admin_media_reply(message: Message):
+    # Получаем ID сообщения, на которое отвечает админ
+    replied_message_id = message.reply_to_message.message_id
+    
+    # Проверяем, есть ли это сообщение в нашей карте
+    if replied_message_id not in admin_message_map:
+        await message.answer("❌ Не могу найти получателя для этого сообщения.")
+        return
+    
+    # Получаем user_id получателя
+    recipient_id = admin_message_map[replied_message_id]
+    
+    # Получаем язык пользователя
+    lang = user_languages.get(recipient_id, 'en')
+    
+    try:
+        # Сначала отправляем заголовок
+        await bot.send_message(recipient_id, TEXTS[lang]['admin_reply'])
+        
+        # Копируем медиа-сообщение пользователю
+        await message.copy_to(recipient_id)
+        
+        # Подтверждение админу
+        await message.answer("✅ Ответ отправлен пользователю!")
+        
+    except Exception as e:
+        await message.answer(f"❌ Ошибка отправки: {e}")
+        logging.error(f"Ошибка отправки медиа-ответа пользователю {recipient_id}: {e}")
 
 # Главная функция запуска бота
 async def main():
