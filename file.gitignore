@@ -1,0 +1,30 @@
+# Код написан Toploardgg 30 декабря 2025 года
+# Файлы, которые не нужно коммитить в Git
+
+# Конфигурация с секретными данными
+config.py
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
