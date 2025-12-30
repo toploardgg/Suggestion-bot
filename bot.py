@@ -9,6 +9,8 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from config import BOT_TOKEN, ADMIN_ID
 
 # Настройка логирования
@@ -66,8 +68,9 @@ def load_languages():
     if os.path.exists(LANGUAGES_FILE):
         try:
             with open(LANGUAGES_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
                 # Конвертируем ключи обратно в int
-                user_languages = {int(k): v for k, v in json.load(f).items()}
+                user_languages = {int(k): v for k, v in data.items()}
             logging.info(f"✅ Загружено {len(user_languages)} языковых настроек пользователей")
         except Exception as e:
             logging.error(f"❌ Ошибка загрузки языков: {e}")
@@ -102,11 +105,12 @@ def get_language_keyboard():
 async def cmd_start(message: Message):
     user_id = message.from_user.id
     
-    # Проверяем, выбран ли уже язык
+    # Проверяем, выбран ли уже язык (теперь он загружается из файла!)
     if user_id in user_languages:
         lang = user_languages[user_id]
         # Пользователь уже выбрал язык, показываем описание бота
         await message.answer(TEXTS[lang]['bot_description'])
+        logging.info(f"👤 Пользователь {user_id} вернулся, язык: {lang}")
     else:
         # Первый запуск, предлагаем выбрать язык
         await message.answer(
@@ -114,6 +118,7 @@ async def cmd_start(message: Message):
             "👋 Добро пожаловать! Выберите язык:",
             reply_markup=get_language_keyboard()
         )
+        logging.info(f"🆕 Новый пользователь {user_id}, предлагаем выбрать язык")
 
 # Обработчик выбора языка
 @dp.callback_query(F.data.startswith("lang_"))
@@ -121,9 +126,13 @@ async def process_language_selection(callback: CallbackQuery):
     lang = callback.data.split("_")[1]  # Получаем 'en' или 'ru'
     user_id = callback.from_user.id
     
-    # Сохраняем язык пользователя
+    # Сохраняем язык пользователя в память
     user_languages[user_id] = lang
-    save_languages()  # Сохраняем в файл
+    
+    # ВАЖНО: Сохраняем в файл сразу после выбора
+    save_languages()
+    
+    logging.info(f"🌐 Пользователь {user_id} выбрал язык: {lang}")
     
     # Отправляем подтверждение
     await callback.message.edit_text(
@@ -149,23 +158,25 @@ async def forward_text_to_admin(message: Message):
     
     # Формируем информацию о пользователе
     user_info = (
-        f"{TEXTS[lang]['admin_notification']}:\n\n"
-        f"👤 ID: {user_id}\n"
-        f"📝 Username: @{message.from_user.username or 'нет username'}\n"
-        f"👨‍💼 Имя: {message.from_user.full_name}\n"
-        f"🌐 Язык: {lang.upper()}\n"
+        f"📨 Новое сообщение:\n\n"
+        f"👤 ID: <code>{user_id}</code>\n"
+        f"📝 @{message.from_user.username or 'нет'}\n"
+        f"👨‍💼 {message.from_user.full_name}\n"
+        f"🌐 {lang.upper()}\n"
         f"━━━━━━━━━━━━━━━━\n"
-        f"💬 Сообщение:\n{message.text}"
+        f"💬 {message.text}"
     )
     
     # Отправляем сообщение админу
-    sent_msg = await bot.send_message(ADMIN_ID, user_info)
+    sent_msg = await bot.send_message(ADMIN_ID, user_info, parse_mode="HTML")
     
     # Сохраняем связь: message_id админа -> user_id отправителя
     admin_message_map[sent_msg.message_id] = user_id
     
     # Подтверждение пользователю
     await message.answer(TEXTS[lang]['forwarded_to_admin'])
+    
+    logging.info(f"📨 Сообщение от {user_id} отправлено админу")
 
 # Обработчик медиа-сообщений от пользователей (НЕ админа)
 @dp.message(~F.text & ~F.from_user.id.in_([ADMIN_ID]))
@@ -186,123 +197,117 @@ async def forward_media_to_admin(message: Message):
     # Определяем тип сообщения для логирования
     message_type = "Unknown"
     if message.photo:
-        message_type = "📸 Photo"
+        message_type = "📸 Фото"
     elif message.video:
-        message_type = "🎥 Video"
+        message_type = "🎥 Видео"
     elif message.video_note:
-        message_type = "📹 Video Note (Circle)"
+        message_type = "📹 Кружок"
     elif message.voice:
-        message_type = "🎤 Voice Message"
+        message_type = "🎤 Голосовое"
     elif message.audio:
-        message_type = "🎵 Audio"
+        message_type = "🎵 Аудио"
     elif message.document:
-        message_type = "📁 Document"
+        message_type = "📁 Файл"
     elif message.sticker:
-        message_type = "🎭 Sticker"
+        message_type = "🎭 Стикер"
     elif message.animation:
-        message_type = "🎬 GIF/Animation"
+        message_type = "🎬 GIF"
     elif message.location:
-        message_type = "🗺️ Location"
+        message_type = "🗺️ Локация"
     elif message.contact:
-        message_type = "📞 Contact"
+        message_type = "📞 Контакт"
     elif message.poll:
-        message_type = "📊 Poll"
+        message_type = "📊 Опрос"
     elif message.dice:
-        message_type = "🎲 Dice"
+        message_type = "🎲 Кубик"
     
     # Формируем информацию о пользователе
+    caption_text = message.caption if message.caption else ""
     user_info = (
-        f"{TEXTS[lang]['admin_notification']}:\n\n"
-        f"👤 ID: {user_id}\n"
-        f"📝 Username: @{message.from_user.username or 'нет username'}\n"
-        f"👨‍💼 Имя: {message.from_user.full_name}\n"
-        f"🌐 Язык: {lang.upper()}\n"
+        f"📨 Новое сообщение:\n\n"
+        f"👤 ID: <code>{user_id}</code>\n"
+        f"📝 @{message.from_user.username or 'нет'}\n"
+        f"👨‍💼 {message.from_user.full_name}\n"
+        f"🌐 {lang.upper()}\n"
         f"📦 Тип: {message_type}\n"
         f"━━━━━━━━━━━━━━━━"
     )
     
+    if caption_text:
+        user_info += f"\n💬 Подпись: {caption_text}"
+    
     # Отправляем информацию админу
-    info_msg = await bot.send_message(ADMIN_ID, user_info)
+    info_msg = await bot.send_message(ADMIN_ID, user_info, parse_mode="HTML")
     
-    # Пересылаем само сообщение (со всеми медиа, кружками, голосовыми и т.д.)
-    forwarded_msg = await message.forward(ADMIN_ID)
+    # Копируем само сообщение админу (не пересылаем, чтобы не было "Forwarded from")
+    copied_msg = await message.copy_to(ADMIN_ID)
     
-    # Сохраняем связь для пересланного сообщения
-    admin_message_map[forwarded_msg.message_id] = user_id
+    # Сохраняем связь для скопированного сообщения
+    admin_message_map[copied_msg.message_id] = user_id
+    # Также сохраняем для информационного сообщения
+    admin_message_map[info_msg.message_id] = user_id
     
     # Подтверждение пользователю
     await message.answer(TEXTS[lang]['forwarded_to_admin'])
+    
+    logging.info(f"📨 {message_type} от {user_id} отправлено админу")
 
-# Обработчик ОТВЕТОВ от АДМИНА на текстовые сообщения
-@dp.message(F.reply_to_message & F.text & F.from_user.id.in_([ADMIN_ID]))
-async def admin_text_reply(message: Message):
+# Обработчик ОТВЕТОВ от АДМИНА (когда админ нажимает "Ответить")
+@dp.message(F.reply_to_message & F.from_user.id.in_([ADMIN_ID]))
+async def admin_reply_handler(message: Message):
     # Получаем ID сообщения, на которое отвечает админ
     replied_message_id = message.reply_to_message.message_id
     
     # Проверяем, есть ли это сообщение в нашей карте
     if replied_message_id not in admin_message_map:
         await message.answer("❌ Не могу найти получателя для этого сообщения.")
+        logging.warning(f"⚠️ Админ ответил на сообщение {replied_message_id}, но ID не найден в карте")
         return
     
     # Получаем user_id получателя
     recipient_id = admin_message_map[replied_message_id]
     
-    # Получаем язык пользователя
+    # Получаем язык пользователя (по умолчанию 'en' если не найден)
     lang = user_languages.get(recipient_id, 'en')
     
     try:
-        # Отправляем текст пользователю с заголовком
-        await bot.send_message(
-            recipient_id,
-            f"{TEXTS[lang]['admin_reply']}\n\n{message.text}"
-        )
+        # Заголовок ответа
+        reply_header = TEXTS[lang]['admin_reply']
         
-        # Подтверждение админу
-        await message.answer("✅ Ответ отправлен пользователю!")
+        # Если это текстовое сообщение
+        if message.text:
+            await bot.send_message(
+                recipient_id,
+                f"{reply_header}\n\n{message.text}"
+            )
+        # Если это медиа с подписью
+        elif message.caption:
+            # Отправляем заголовок отдельно
+            await bot.send_message(recipient_id, reply_header)
+            # Копируем медиа с подписью
+            await message.copy_to(recipient_id)
+        # Если это медиа без подписи
+        else:
+            # Отправляем заголовок отдельно
+            await bot.send_message(recipient_id, reply_header)
+            # Копируем медиа
+            await message.copy_to(recipient_id)
         
-    except Exception as e:
-        await message.answer(f"❌ Ошибка отправки: {e}")
-        logging.error(f"Ошибка отправки ответа пользователю {recipient_id}: {e}")
-
-# Обработчик ОТВЕТОВ от АДМИНА на медиа-сообщения
-@dp.message(F.reply_to_message & ~F.text & F.from_user.id.in_([ADMIN_ID]))
-async def admin_media_reply(message: Message):
-    # Получаем ID сообщения, на которое отвечает админ
-    replied_message_id = message.reply_to_message.message_id
-    
-    # Проверяем, есть ли это сообщение в нашей карте
-    if replied_message_id not in admin_message_map:
-        await message.answer("❌ Не могу найти получателя для этого сообщения.")
-        return
-    
-    # Получаем user_id получателя
-    recipient_id = admin_message_map[replied_message_id]
-    
-    # Получаем язык пользователя
-    lang = user_languages.get(recipient_id, 'en')
-    
-    try:
-        # Сначала отправляем заголовок
-        await bot.send_message(recipient_id, TEXTS[lang]['admin_reply'])
-        
-        # Копируем медиа-сообщение пользователю
-        await message.copy_to(recipient_id)
-        
-        # Подтверждение админу
-        await message.answer("✅ Ответ отправлен пользователю!")
+        # Подтверждение админу (КОРОТКОЕ)
+        await message.answer(f"✅ Отправлено пользователю {recipient_id}")
+        logging.info(f"📤 Админ ответил пользователю {recipient_id}")
         
     except Exception as e:
         await message.answer(f"❌ Ошибка отправки: {e}")
-        logging.error(f"Ошибка отправки медиа-ответа пользователю {recipient_id}: {e}")
+        logging.error(f"❌ Ошибка отправки ответа пользователю {recipient_id}: {e}")
 
 # Главная функция запуска бота
 async def main():
-    # Загружаем сохраненные языки при запуске
+    # ВАЖНО: Загружаем сохраненные языки ПРИ ЗАПУСКЕ бота
     load_languages()
+    logging.info(f"📂 Загружено языков из базы: {len(user_languages)}")
     
     # Удаляем вебхуки (если были) БЕЗ удаления накопленных сообщений
-    # drop_pending_updates=False означает, что бот обработает все сообщения,
-    # которые были отправлены, когда он был выключен (до 24 часов)
     await bot.delete_webhook(drop_pending_updates=False)
     
     # Запускаем polling
