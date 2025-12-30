@@ -10,6 +10,8 @@ from aiogram.filters import Command
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiogram.fsm.storage.memory import MemoryStorage
 from config import BOT_TOKEN, ADMIN_ID
+from aiogram.filters import Command
+from aiogram import F
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -157,6 +159,35 @@ async def forward_to_admin(message: Message):
     
     # Подтверждение пользователю
     await message.answer(TEXTS[lang]['forwarded_to_admin'])
+
+@dp.message(F.reply_to_message & F.from_user.id == ADMIN_ID)
+async def admin_reply_handler(message: Message):
+    """
+    Обрабатывает ответы админа на пересланные сообщения пользователей.
+    Пересылает сообщение админа обратно исходному пользователю.
+    Поддерживает все типы: текст, фото, видео, кружки (video_note), голосовые, стикеры, документы, анимации и т.д.
+    """
+    replied_msg = message.reply_to_message
+    
+    # Проверяем, что это наше пересланное сообщение и есть forward_from
+    if replied_msg.forward_from:
+        original_user_id = replied_msg.forward_from.id
+    elif replied_msg.forward_sender_name:  # если пользователь скрыл профиль
+        # К сожалению, в этом случае ID недоступен — пропускаем или уведомляем админа
+        await message.reply("❌ Не могу отправить: пользователь скрыл профиль (forward_sender_name)")
+        return
+    else:
+        await message.reply("❌ Это не пересланное сообщение от пользователя")
+        return
+    
+    try:
+        # Копируем сообщение админа пользователю (сохраняет весь формат и тип)
+        await message.copy_to(chat_id=original_user_id)
+        # Опционально: подтверждение админу
+        await message.reply("✅ Ответ отправлен пользователю!")
+    except Exception as e:
+        logging.error(f"Ошибка отправки ответа пользователю {original_user_id}: {e}")
+        await message.reply(f"❌ Ошибка отправки: {e}")
 
 # Обработчик всех остальных типов сообщений (фото, видео, документы, кружки, голосовые и т.д.)
 @dp.message()
