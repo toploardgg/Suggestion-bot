@@ -1,4 +1,4 @@
-# 🤖 Telegram Language Bot
+# 🤖 Telegram suggest bot
 
 <div align="center">
 
